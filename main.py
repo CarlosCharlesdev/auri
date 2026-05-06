@@ -33,6 +33,37 @@ def normalizar_resposta(texto: str) -> str:
         return 'nao'
     return palavras[0] if palavras else texto
 
+async def extrair_descricao_limpa(mensagem: str) -> str:
+    """Remove preâmbulos como 'errei, na verdade' e extrai só a descrição real."""
+    prompt = (
+        "Extraia apenas a descrição do problema da mensagem abaixo, removendo qualquer preâmbulo "
+        "como 'errei', 'na verdade', 'gostaria de mudar para', 'quero alterar', etc.\n"
+        "Retorne SOMENTE a descrição limpa, sem aspas, sem explicações.\n\n"
+        f"Mensagem: {mensagem}\n\n"
+        "Descrição limpa:"
+    )
+    try:
+        resultado = await perguntar_ollama(prompt, max_tokens=80)
+        # Remove aspas se vier com elas
+        limpo = resultado.strip().strip('"').strip("'")
+        return limpo if limpo else mensagem
+    except Exception:
+        return mensagem
+
+def detectar_correcao(mensagem: str) -> str | None:
+    """Detecta o que a pessoa quer corrigir. Retorna: 'tipo', 'local', 'foto' ou None."""
+    import unicodedata
+    texto = mensagem.lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+
+    if any(p in texto for p in ["local", "endereco", "endereço", "rua", "bairro", "lugar", "logradouro"]):
+        return "local"
+    if any(p in texto for p in ["foto", "imagem", "print", "fotografia", "picture"]):
+        return "foto"
+    # Se descreve outro problema = quer corrigir o tipo
+    return "tipo"
+
 # ==============================
 # 🔧 CONFIG
 # ==============================
@@ -174,29 +205,70 @@ async def perguntar_ollama(prompt: str, max_tokens: int = 200) -> str:
 # ==============================
 # 🧠 CLASSIFICAÇÃO
 # ==============================
+# Mapeamento direto de palavras-chave
+KEYWORDS = {
+    ("alagamento", "alagou", "inundacao", "inundação", "enchente", "alagada"): ("Infraestrutura", "Alagamento"),
+    ("buraco", "cratera", "asfalto danificado"): ("Infraestrutura", "Buraco na via"),
+    ("calcada", "calçada", "passeio"): ("Infraestrutura", "Calçada danificada"),
+    ("iluminacao", "iluminação", "poste", "lampada", "lâmpada"): ("Infraestrutura", "Iluminação pública"),
+    ("esgoto", "bueiro", "valeta"): ("Infraestrutura", "Esgoto"),
+    ("obra irregular", "construcao irregular"): ("Infraestrutura", "Obra irregular"),
+    ("lixo", "entulho", "descarte"): ("Meio Ambiente", "Descarte irregular de lixo"),
+    ("poluicao", "poluição", "fumaca", "fumaça"): ("Meio Ambiente", "Poluição"),
+    ("desmatamento", "derrubada"): ("Meio Ambiente", "Desmatamento"),
+    ("queimada", "incendio", "incêndio"): ("Meio Ambiente", "Queimada"),
+    ("animal abandonado", "cao abandonado", "cachorro abandonado"): ("Meio Ambiente", "Animal abandonado"),
+    ("vandalismo", "depredacao", "depredação"): ("Dano ao Patrimônio", "Vandalismo"),
+    ("pichacao", "pichação", "grafite"): ("Dano ao Patrimônio", "Pichação"),
+    ("dengue", "mosquito"): ("Saúde Pública", "Foco de dengue"),
+    ("agua contaminada", "água contaminada"): ("Saúde Pública", "Água contaminada"),
+    ("semaforo", "semáforo"): ("Mobilidade / Trânsito", "Semáforo com defeito"),
+    ("sinalizacao", "sinalização"): ("Mobilidade / Trânsito", "Sinalização apagada"),
+    ("acidente"): ("Mobilidade / Trânsito", "Acidente"),
+    ("coleta de lixo", "lixeiro"): ("Serviços Públicos", "Falta de coleta de lixo"),
+    ("sem agua", "sem água", "falta de agua"): ("Serviços Públicos", "Falta de água"),
+    ("sem energia", "sem luz", "falta de energia", "apagao", "apagão"): ("Serviços Públicos", "Falta de energia"),
+    ("poda", "galho"): ("Serviços Públicos", "Poda de árvore"),
+}
+
+def classificar_por_keyword(mensagem: str):
+    import unicodedata
+    texto = mensagem.lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    for palavras, (modulo, subcategoria) in KEYWORDS.items():
+        chaves = (palavras,) if isinstance(palavras, str) else palavras
+        if any(p in texto for p in chaves):
+            return {"modulo": modulo, "subcategoria": subcategoria, "confianca": "alta"}
+    return None
+
 async def classificar(mensagem: str) -> dict:
+    resultado_kw = classificar_por_keyword(mensagem)
+    if resultado_kw:
+        print(f"Classificado por keyword: {resultado_kw}")
+        return resultado_kw
+
     prompt = (
-        'Você é um sistema de classificação de denúncias urbanas. '
-        'Analise a mensagem e responda APENAS com JSON válido, sem explicações, sem markdown.\n\n'
-        'Módulos e subcategorias:\n'
-        '- Infraestrutura: Buraco na via, Calçada danificada, Iluminação pública, Esgoto, Alagamento, Obra irregular\n'
-        '- Meio Ambiente: Descarte irregular de lixo, Poluição, Desmatamento, Queimada, Animal abandonado\n'
-        '- Dano ao Patrimônio: Vandalismo, Pichação, Depredação de bem público\n'
-        '- Saúde Pública: Foco de dengue, Esgoto a céu aberto, Estabelecimento irregular, Água contaminada\n'
-        '- Mobilidade / Trânsito: Semáforo com defeito, Sinalização apagada, Estacionamento irregular, Acidente\n'
-        '- Serviços Públicos: Falta de coleta de lixo, Falta de água, Falta de energia, Poda de árvore\n'
-        '- Outros: Outros\n\n'
-        'Regras:\n'
-        '- Cumprimento ou mensagem vaga → confianca "baixa"\n'
-        '- Problema claro → confianca "alta"\n'
-        '- Dúvida → confianca "media"\n\n'
-        f'Mensagem: "{mensagem}"\n\n'
-        'Responda SOMENTE com este JSON:\n'
-        '{"modulo":"...","subcategoria":"...","confianca":"alta|media|baixa"}'
+        "Você é um sistema de classificação de denúncias urbanas. "
+        "Analise a mensagem e responda APENAS com JSON válido, sem explicações, sem markdown.\n\n"
+        "Módulos e subcategorias:\n"
+        "- Infraestrutura: Buraco na via, Calçada danificada, Iluminação pública, Esgoto, Alagamento, Obra irregular\n"
+        "- Meio Ambiente: Descarte irregular de lixo, Poluição, Desmatamento, Queimada, Animal abandonado\n"
+        "- Dano ao Patrimônio: Vandalismo, Pichação, Depredação de bem público\n"
+        "- Saúde Pública: Foco de dengue, Esgoto a céu aberto, Estabelecimento irregular, Água contaminada\n"
+        "- Mobilidade / Trânsito: Semáforo com defeito, Sinalização apagada, Estacionamento irregular, Acidente\n"
+        "- Serviços Públicos: Falta de coleta de lixo, Falta de água, Falta de energia, Poda de árvore\n"
+        "- Outros: Outros\n\n"
+        "IMPORTANTE: subcategoria deve ser EXATAMENTE uma das listadas acima.\n"
+        "- Cumprimento ou mensagem vaga → confianca baixa\n"
+        "- Problema claro → confianca alta\n\n"
+        f"Mensagem: \"{mensagem}\"\n\n"
+        "Responda SOMENTE com este JSON:\n"
+        "{\"modulo\":\"...\",\"subcategoria\":\"...\",\"confianca\":\"alta|media|baixa\"}"
     )
     try:
         import json
-        resposta = await perguntar_ollama(prompt)
+        resposta = await perguntar_ollama(prompt, max_tokens=80)
         clean = resposta.replace("```json", "").replace("```", "").strip()
         inicio = clean.find("{")
         fim = clean.rfind("}") + 1
@@ -210,7 +282,6 @@ async def classificar(mensagem: str) -> dict:
     except Exception as e:
         print(f"Erro ao classificar: {e}")
         return {"modulo": "Outros", "subcategoria": "Outros", "confianca": "baixa"}
-
 # ==============================
 # 🎙️ PIPELINE DE ÁUDIO
 # ==============================
@@ -330,9 +401,8 @@ async def processar_audio(numero: str, audio_url: str):
             "subcategoria": classificacao["subcategoria"]
         })
         await falar(numero,
-            f"Ola! Recebi sua denuncia. "
-            f"Identifiquei que se trata de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
-            f"Esta correto? Responda sim ou nao.")
+            f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
+            f"Qual o endereco ou local onde aconteceu?")
 
 # ==============================
 # 📝 FLUXO TEXTO (com emojis e formatação)
@@ -357,11 +427,11 @@ async def processar_fluxo(numero: str, mensagem: str):
         else:
             session["modulo"] = classificacao["modulo"]
             session["subcategoria"] = classificacao["subcategoria"]
-            session["etapa"] = "CONFIRMANDO_CLASSIFICACAO"
+            session["etapa"] = "AGUARDANDO_LOCAL"
             await enviar_mensagem(numero,
-                f"Entendi! Vou registrar uma denúncia de:\n\n"
+                f"Entendi! Vou registrar uma denúncia de:\n"
                 f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-                f"Está correto? Responda *sim* ou *não*")
+                f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
 
     elif etapa == "CONFIRMANDO_CLASSIFICACAO":
         resp = mensagem.strip().lower()
@@ -386,21 +456,24 @@ async def processar_fluxo(numero: str, mensagem: str):
         else:
             session["modulo"] = classificacao["modulo"]
             session["subcategoria"] = classificacao["subcategoria"]
-            session["etapa"] = "CONFIRMANDO_CLASSIFICACAO"
+            session["etapa"] = "AGUARDANDO_LOCAL"
             await enviar_mensagem(numero,
-                f"Agora entendi! É uma denúncia de:\n\n"
+                f"Entendi! Vou registrar uma denúncia de:\n"
                 f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-                f"Está correto? Responda *sim* ou *não*")
+                f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
 
     elif etapa == "AGUARDANDO_LOCAL":
-        session["local"] = mensagem.strip()
+        resp = mensagem.strip().lower()
+        if resp in ("sim", "s") and session.get("local"):
+            pass  # mantém o local anterior
+        else:
+            session["local"] = mensagem.strip()
         session["etapa"] = "AGUARDANDO_FOTO"
         await enviar_mensagem(numero,
             "📸 Você tem uma foto do problema? Se sim, envie agora.\n"
             "Se não tiver, responda *pular*")
 
     elif etapa == "AGUARDANDO_FOTO":
-        # Aceita pular ou qualquer texto (foto chega via imagem, não texto)
         session["foto_url"] = None
         session["etapa"] = "CONFIRMANDO_DENUNCIA"
         await enviar_mensagem(numero,
@@ -409,7 +482,7 @@ async def processar_fluxo(numero: str, mensagem: str):
             f"🏷️ Tipo: *{session['subcategoria']}*\n"
             f"📝 Descrição: {session['descricao']}\n"
             f"📍 Local: {session['local']}\n"
-            f"📸 Foto: {'Sim' if session.get('foto_url') else 'Não'}\n\n"
+            f"📸 Foto: Não\n\n"
             f"Confirma o registro? Responda *sim* ou *não*")
 
     elif etapa == "CONFIRMANDO_DENUNCIA":
@@ -430,9 +503,37 @@ async def processar_fluxo(numero: str, mensagem: str):
                 f"✅ *Denúncia registrada com sucesso!*\n\n"
                 f"🔖 Protocolo: *{protocolo}*\n\n"
                 f"Guarde este número para acompanhar sua denúncia.\nAgradecemos sua contribuição! 🙏")
-        else:
+        elif resp in ("cancelar", "cancela"):
             del sessoes[numero]
             await enviar_mensagem(numero, "❌ Denúncia cancelada. Obrigado!")
+        else:
+            # Detecta o que a pessoa quer corrigir
+            correcao = detectar_correcao(mensagem)
+            if correcao == "local":
+                session["etapa"] = "AGUARDANDO_LOCAL"
+                await enviar_mensagem(numero,
+                    "📍 Qual o novo *endereço ou local*?\n(rua, bairro ou ponto de referência)")
+            elif correcao == "foto":
+                session["etapa"] = "AGUARDANDO_FOTO"
+                await enviar_mensagem(numero,
+                    "📸 Envie a nova foto ou responda *pular* para continuar sem foto.")
+            else:
+                # Quer corrigir o tipo/descrição — extrai descrição limpa e reclassifica
+                descricao_limpa = await extrair_descricao_limpa(mensagem)
+                classificacao = await classificar(descricao_limpa)
+                session["descricao"] = descricao_limpa
+                if classificacao["confianca"] != "baixa":
+                    session["modulo"] = classificacao["modulo"]
+                    session["subcategoria"] = classificacao["subcategoria"]
+                session["etapa"] = "CONFIRMANDO_DENUNCIA"
+                await enviar_mensagem(numero,
+                    f"📋 *Resumo atualizado:*\n\n"
+                    f"📂 Módulo: *{session['modulo']}*\n"
+                    f"🏷️ Tipo: *{session['subcategoria']}*\n"
+                    f"📝 Descrição: {session['descricao']}\n"
+                    f"📍 Local: {session['local']}\n"
+                    f"📸 Foto: {'Sim' if session.get('foto_url') else 'Não'}\n\n"
+                    f"Confirma o registro? Responda *sim* ou *não*")
 
 # ==============================
 # 🎙️ FLUXO ÁUDIO (sem emojis, sem formatação)
@@ -456,9 +557,10 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
         else:
             session["modulo"] = classificacao["modulo"]
             session["subcategoria"] = classificacao["subcategoria"]
-            session["etapa"] = "CONFIRMANDO_CLASSIFICACAO"
+            session["etapa"] = "AGUARDANDO_LOCAL"
             await falar(numero,
-                f"Entendi. Vou registrar uma denúncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. Está correto? Responda sim ou não.")
+                f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
+                f"Qual o endereco ou local onde aconteceu?")
 
     elif etapa == "CONFIRMANDO_CLASSIFICACAO":
         resp = normalizar_resposta(mensagem)
@@ -480,12 +582,17 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
         else:
             session["modulo"] = classificacao["modulo"]
             session["subcategoria"] = classificacao["subcategoria"]
-            session["etapa"] = "CONFIRMANDO_CLASSIFICACAO"
+            session["etapa"] = "AGUARDANDO_LOCAL"
             await falar(numero,
-                f"Agora entendi. É uma denúncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. Está correto? Responda sim ou não.")
+                f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
+                f"Qual o endereco ou local onde aconteceu?")
 
     elif etapa == "AGUARDANDO_LOCAL":
-        session["local"] = mensagem.strip()
+        resp = normalizar_resposta(mensagem)
+        if resp == "sim" and session.get("local"):
+            pass  # mantém o local anterior
+        else:
+            session["local"] = mensagem.strip()
         session["etapa"] = "AGUARDANDO_FOTO"
         await falar(numero, "Voce tem uma foto do problema? Se sim, envie agora. Se nao tiver, diga pular.")
 
@@ -498,6 +605,7 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
             f"Tipo: {session['subcategoria']}. "
             f"Descricao: {session['descricao']}. "
             f"Local: {session['local']}. "
+            f"Foto: nao. "
             f"Confirma o registro? Responda sim ou nao.")
 
     elif etapa == "CONFIRMANDO_DENUNCIA":
@@ -517,10 +625,34 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
             await falar(numero,
                 f"Denuncia registrada com sucesso! "
                 f"Seu protocolo e {protocolo}. "
-                f"Guarde este numero para acompanhar sua denuncia. Obrigado pela sua contribuicao!")
-        else:
+                f"Guarde este numero para acompanhar sua denuncia. Obrigado!")
+        elif resp in ("cancelar", "cancela"):
             del sessoes[numero]
             await falar(numero, "Denuncia cancelada. Obrigado!")
+        else:
+            correcao = detectar_correcao(mensagem)
+            if correcao == "local":
+                session["etapa"] = "AGUARDANDO_LOCAL"
+                await falar(numero, "Qual o novo endereco ou local?")
+            elif correcao == "foto":
+                session["etapa"] = "AGUARDANDO_FOTO"
+                await falar(numero, "Envie a nova foto ou diga pular para continuar sem foto.")
+            else:
+                descricao_limpa = await extrair_descricao_limpa(mensagem)
+                classificacao = await classificar(descricao_limpa)
+                session["descricao"] = descricao_limpa
+                if classificacao["confianca"] != "baixa":
+                    session["modulo"] = classificacao["modulo"]
+                    session["subcategoria"] = classificacao["subcategoria"]
+                session["etapa"] = "CONFIRMANDO_DENUNCIA"
+                await falar(numero,
+                    f"Resumo atualizado. "
+                    f"Modulo: {session['modulo']}. "
+                    f"Tipo: {session['subcategoria']}. "
+                    f"Descricao: {session['descricao']}. "
+                    f"Local: {session['local']}. "
+                    f"Foto: {'sim' if session.get('foto_url') else 'nao'}. "
+                    f"Confirma o registro? Responda sim ou nao.")
 
 # ==============================
 # 🔗 WEBHOOK
@@ -549,6 +681,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             prefere_audio = sessoes[numero].get("prefere_audio")
             # Avança para confirmação
             session = sessoes[numero]
+            session["foto_url"] = foto_url
             session["etapa"] = "CONFIRMANDO_DENUNCIA"
             if prefere_audio:
                 await falar(numero,
@@ -556,7 +689,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     f"Resumo da sua denuncia. "
                     f"Modulo: {session['modulo']}. "
                     f"Tipo: {session['subcategoria']}. "
+                    f"Descricao: {session['descricao']}. "
                     f"Local: {session['local']}. "
+                    f"Foto: sim. "
                     f"Confirma o registro? Responda sim ou nao.")
             else:
                 await enviar_mensagem(numero,
@@ -607,10 +742,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             "modulo":       classificacao["modulo"],
             "subcategoria": classificacao["subcategoria"]
         }
-        await responder(numero,
-            f"Olá! 👋 Recebi sua denúncia.\n\n"
-            f"Identifiquei que se trata de:\n"
+        await enviar_mensagem(numero,
+            f"Entendi! Vou registrar uma denúncia de:\n"
             f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-            f"Está correto? Responda *sim* ou *não*")
+            f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
 
     return {"status": "ok"}
