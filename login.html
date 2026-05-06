@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login — Sistema de Denúncias</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="login-page">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="brand">Zap<span>AI</span> Denúncias</div>
+      <div class="subtitle">Painel de Controle</div>
+    </div>
+
+    <div class="login-error" id="erro">Usuário ou senha inválidos.</div>
+
+    <form id="form-login">
+      <div class="form-group">
+        <label>Usuário</label>
+        <input type="text" id="usuario" placeholder="seu.usuario" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label>Senha</label>
+        <input type="password" id="senha" placeholder="••••••••" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn btn-primary" style="width:100%;margin-top:8px;padding:12px">
+        Entrar
+      </button>
+    </form>
+  </div>
+</div>
+
+<script>
+document.getElementById('form-login').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = e.target.querySelector('button');
+  btn.textContent = 'Entrando...';
+  btn.disabled = true;
+
+  const res = await fetch('/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `usuario=${encodeURIComponent(document.getElementById('usuario').value)}&senha=${encodeURIComponent(document.getElementById('senha').value)}`
+  });
+
+  const data = await res.json();
+  if (data.ok) {
+    window.location.href = '/';
+  } else {
+    document.getElementById('erro').style.display = 'block';
+    btn.textContent = 'Entrar';
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

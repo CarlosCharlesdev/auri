@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Denúncias</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<script src="/layout.js"></script>
+<script>
+let currentPage = 1;
+let totalPages = 1;
+
+function getFilters() {
+  return {
+    modulo:      document.getElementById('f-modulo')?.value || '',
+    status:      document.getElementById('f-status')?.value || '',
+    data_inicio: document.getElementById('f-inicio')?.value || '',
+    data_fim:    document.getElementById('f-fim')?.value    || '',
+    busca:       document.getElementById('f-busca')?.value  || '',
+  };
+}
+
+async function loadTable(page = 1) {
+  currentPage = page;
+  const f = getFilters();
+  const params = new URLSearchParams({ page, ...Object.fromEntries(Object.entries(f).filter(([,v]) => v)) });
+
+  document.getElementById('tbody').innerHTML = `<tr><td colspan="7"><div class="loading"><div class="spinner"></div></div></td></tr>`;
+  document.getElementById('pag-info').textContent = '';
+
+  const data = await fetch(`/api/denuncias?${params}`).then(r => r.json());
+  totalPages = data.pages || 1;
+
+  document.getElementById('pag-info').textContent = `${data.total} denúncia${data.total !== 1 ? 's' : ''} encontrada${data.total !== 1 ? 's' : ''}`;
+  renderPagination(page, totalPages);
+
+  if (!data.denuncias.length) {
+    document.getElementById('tbody').innerHTML = `<tr><td colspan="7"><div class="empty"><div class="icon">🔍</div><p>Nenhuma denúncia encontrada.</p></div></td></tr>`;
+    return;
+  }
+
+  document.getElementById('tbody').innerHTML = data.denuncias.map(d => `
+    <tr onclick="location.href='/denuncia/${d.id}'">
+      <td class="protocolo">${d.protocolo}</td>
+      <td>${d.modulo || '—'}</td>
+      <td>${d.subcategoria || '—'}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${d.descricao || ''}">${d.descricao || '—'}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.local || '—'}</td>
+      <td>${badgeHTML(d.status)}</td>
+      <td style="color:var(--text-dim);white-space:nowrap">${formatDate(d.criado_em)}</td>
+    </tr>`).join('');
+}
+
+function renderPagination(page, total) {
+  const wrap = document.getElementById('pag-btns');
+  let html = `<button class="pag-btn" onclick="loadTable(${page-1})" ${page<=1?'disabled':''}>←</button>`;
+  const start = Math.max(1, page - 2);
+  const end   = Math.min(total, page + 2);
+  for (let i = start; i <= end; i++) {
+    html += `<button class="pag-btn ${i===page?'active':''}" onclick="loadTable(${i})">${i}</button>`;
+  }
+  html += `<button class="pag-btn" onclick="loadTable(${page+1})" ${page>=total?'disabled':''}>→</button>`;
+  wrap.innerHTML = html;
+}
+
+async function init() {
+  await renderLayout('Denúncias', 'Todas as denúncias registradas', 'denuncias');
+
+  document.getElementById('content').innerHTML = `
+    <div class="table-card">
+      <div class="table-header">
+        <div class="table-title">Filtros</div>
+        <div class="filters">
+          <input type="text" id="f-busca" placeholder="Buscar protocolo, local..." style="width:200px">
+          <select id="f-modulo">
+            <option value="">Todos os módulos</option>
+            <option>Infraestrutura</option>
+            <option>Meio Ambiente</option>
+            <option>Dano ao Patrimônio</option>
+            <option>Saúde Pública</option>
+            <option>Mobilidade / Trânsito</option>
+            <option>Serviços Públicos</option>
+            <option>Outros</option>
+          </select>
+          <select id="f-status">
+            <option value="">Todos os status</option>
+            <option value="pendente">Pendente</option>
+            <option value="em_analise">Em análise</option>
+            <option value="resolvido">Resolvido</option>
+            <option value="arquivado">Arquivado</option>
+          </select>
+          <input type="date" id="f-inicio" title="Data início">
+          <input type="date" id="f-fim" title="Data fim">
+          <button class="btn btn-primary" onclick="loadTable(1)">Filtrar</button>
+          <button class="btn btn-ghost" onclick="limparFiltros()">Limpar</button>
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Protocolo</th>
+            <th>Módulo</th>
+            <th>Tipo</th>
+            <th>Descrição</th>
+            <th>Local</th>
+            <th>Status</th>
+            <th>Data</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+
+      <div class="pagination">
+        <span id="pag-info"></span>
+        <div class="pag-btns" id="pag-btns"></div>
+      </div>
+    </div>
+  `;
+
+  // Filtrar ao pressionar Enter
+  document.getElementById('f-busca').addEventListener('keydown', e => { if (e.key === 'Enter') loadTable(1); });
+
+  loadTable(1);
+}
+
+function limparFiltros() {
+  ['f-busca','f-modulo','f-status','f-inicio','f-fim'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  loadTable(1);
+}
+
+init();
+</script>
+</body>
+</html>

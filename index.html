@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard — Denúncias</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<script src="/layout.js"></script>
+<script>
+const MODULO_CORES = {
+  'Infraestrutura':       '#3B82F6',
+  'Meio Ambiente':        '#16A34A',
+  'Dano ao Patrimônio':   '#DC2626',
+  'Saúde Pública':        '#D97706',
+  'Mobilidade / Trânsito':'#8B5CF6',
+  'Serviços Públicos':    '#0891B2',
+  'Outros':               '#64748B',
+};
+
+async function init() {
+  await renderLayout('Dashboard', 'Visão geral das denúncias', 'dashboard');
+  const c = document.getElementById('content');
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Carregando...</div>`;
+
+  const stats = await fetch('/api/stats').then(r => r.json());
+
+  const pendente   = stats.porStatus.find(s => s.status === 'pendente')?.total || 0;
+  const em_analise = stats.porStatus.find(s => s.status === 'em_analise')?.total || 0;
+  const resolvido  = stats.porStatus.find(s => s.status === 'resolvido')?.total || 0;
+
+  const maxModulo = Math.max(...stats.porModulo.map(m => parseInt(m.total)), 1);
+
+  const barras = stats.porModulo.map(m => {
+    const pct = Math.round((parseInt(m.total) / maxModulo) * 100);
+    const cor = MODULO_CORES[m.modulo] || '#3B82F6';
+    return `
+      <div class="bar-item">
+        <label>${m.modulo} <span>${m.total}</span></label>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:${cor}"></div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const statusRows = stats.porStatus.map(s => {
+    const map = { pendente: '#fbbf24', em_analise: '#60a5fa', resolvido: '#4ade80', arquivado: '#64748b' };
+    const cor = map[s.status] || '#94a3b8';
+    const label = { pendente: 'Pendente', em_analise: 'Em análise', resolvido: 'Resolvido', arquivado: 'Arquivado' };
+    return `
+      <div class="status-row">
+        <span>
+          <span class="status-dot" style="background:${cor}"></span>
+          <span class="status-name">${label[s.status] || s.status}</span>
+        </span>
+        <span class="status-count">${s.total}</span>
+      </div>`;
+  }).join('');
+
+  c.innerHTML = `
+    <div class="cards-grid">
+      <div class="card blue">
+        <div class="card-label">Total de denúncias</div>
+        <div class="card-value">${stats.total}</div>
+        <div class="card-sub">Desde o início</div>
+      </div>
+      <div class="card yellow">
+        <div class="card-label">Pendentes</div>
+        <div class="card-value">${pendente}</div>
+        <div class="card-sub">Aguardando análise</div>
+      </div>
+      <div class="card blue">
+        <div class="card-label">Em análise</div>
+        <div class="card-value">${em_analise}</div>
+        <div class="card-sub">Em andamento</div>
+      </div>
+      <div class="card green">
+        <div class="card-label">Últimos 7 dias</div>
+        <div class="card-value">${stats.ultimos7dias}</div>
+        <div class="card-sub">Novas denúncias</div>
+      </div>
+    </div>
+
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-title">Denúncias por módulo</div>
+        <div class="bar-list">${barras || '<div class="empty"><p>Sem dados</p></div>'}</div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Status das denúncias</div>
+        <div class="status-list">${statusRows || '<div class="empty"><p>Sem dados</p></div>'}</div>
+      </div>
+    </div>
+
+    <div class="table-card">
+      <div class="table-header">
+        <div class="table-title">Denúncias recentes</div>
+        <a href="/denuncias" class="btn btn-ghost">Ver todas →</a>
+      </div>
+      <div id="recentes-table"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  `;
+
+  // Load recentes
+  const { denuncias } = await fetch('/api/denuncias?page=1').then(r => r.json());
+  const slice = denuncias.slice(0, 8);
+
+  document.getElementById('recentes-table').innerHTML = slice.length ? `
+    <table>
+      <thead>
+        <tr>
+          <th>Protocolo</th>
+          <th>Módulo</th>
+          <th>Tipo</th>
+          <th>Local</th>
+          <th>Status</th>
+          <th>Data</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${slice.map(d => `
+          <tr onclick="location.href='/denuncia/${d.id}'">
+            <td class="protocolo">${d.protocolo}</td>
+            <td>${d.modulo || '—'}</td>
+            <td>${d.subcategoria || '—'}</td>
+            <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${d.local || '—'}</td>
+            <td>${badgeHTML(d.status)}</td>
+            <td style="color:var(--text-dim)">${formatDate(d.criado_em)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>` : `<div class="empty"><div class="icon">📭</div><p>Nenhuma denúncia registrada ainda.</p></div>`;
+}
+
+init();
+</script>
+</body>
+</html>

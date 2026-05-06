@@ -33,22 +33,37 @@ def normalizar_resposta(texto: str) -> str:
         return 'nao'
     return palavras[0] if palavras else texto
 
+def extrair_descricao_limpa_sync(mensagem: str) -> str:
+    """Extrai descrição limpa via regex sem usar IA."""
+    import re
+
+    # 1. Conteúdo entre aspas — pega direto
+    match = re.search(r'["“„](.+?)["”]', mensagem)
+    if not match:
+        match = re.search(r"'(.+?)'", mensagem)
+    if match:
+        return match.group(1).strip()
+
+    # 2. Remove preâmbulos conhecidos
+    preambulos = [
+        r"^(gostaria de |quero |pode |por favor |pfv |pf )?(mudar|alterar|corrigir|trocar|atualizar)( a descri[çc][aã]o| o texto| isso| para| pra| s[oó]| apenas)?[:\s]*",
+        r"^(errei[,\s]+|na verdade[,\s]+|[ée] na verdade[,\s]+|mentira[,\s]+)",
+        r"^(o certo [ée][:\s]*|correto seria[:\s]*|deveria ser[:\s]*)",
+        r"^(coloca[,\s]+|escreve[,\s]+|registra[,\s]+)",
+        r"^(a descri[çc][aã]o [ée][:\s]*|descri[çc][aã]o[:\s]*)",
+        r"^(muda[,\s]+|mudando[,\s]+)",
+    ]
+    texto = mensagem.strip()
+    for p in preambulos:
+        novo = re.sub(p, "", texto, flags=re.IGNORECASE).strip().lstrip(",:;- ").strip()
+        if novo:
+            texto = novo
+
+    return texto if texto else mensagem
+
 async def extrair_descricao_limpa(mensagem: str) -> str:
-    """Remove preâmbulos como 'errei, na verdade' e extrai só a descrição real."""
-    prompt = (
-        "Extraia apenas a descrição do problema da mensagem abaixo, removendo qualquer preâmbulo "
-        "como 'errei', 'na verdade', 'gostaria de mudar para', 'quero alterar', etc.\n"
-        "Retorne SOMENTE a descrição limpa, sem aspas, sem explicações.\n\n"
-        f"Mensagem: {mensagem}\n\n"
-        "Descrição limpa:"
-    )
-    try:
-        resultado = await perguntar_ollama(prompt, max_tokens=80)
-        # Remove aspas se vier com elas
-        limpo = resultado.strip().strip('"').strip("'")
-        return limpo if limpo else mensagem
-    except Exception:
-        return mensagem
+    """Extrai descrição limpa — regex, sem chamar IA."""
+    return extrair_descricao_limpa_sync(mensagem)
 
 def detectar_correcao(mensagem: str) -> str | None:
     """Detecta o que a pessoa quer corrigir. Retorna: 'tipo', 'local', 'foto' ou None."""
@@ -676,7 +691,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     if tipo == "image":
         if numero in sessoes and sessoes[numero].get("etapa") == "AGUARDANDO_FOTO":
             image_data = msg.get("image") or {}
-            foto_url = image_data.get("link") or image_data.get("id") or "recebida"
+            # Salva preview base64 (miniatura) + id separados na sessão
+            import json as _json
+            preview  = image_data.get("preview")   # miniatura base64 já no payload
+            media_id = image_data.get("id")        # ID pra baixar a imagem original
+            print(f"[FOTO] Foto recebida. ID: {media_id}")
+            foto_url = _json.dumps({"preview": preview, "id": media_id}) if (preview or media_id) else None
             sessoes[numero]["foto_url"] = foto_url
             prefere_audio = sessoes[numero].get("prefere_audio")
             # Avança para confirmação

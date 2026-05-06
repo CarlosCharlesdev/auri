@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Detalhe da Denúncia</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<script src="/layout.js"></script>
+<script>
+async function init() {
+  await renderLayout('Detalhe', 'Informações da denúncia', 'denuncias');
+
+  const id = location.pathname.split('/').pop();
+  const c  = document.getElementById('content');
+
+  c.innerHTML = `<div class="loading"><div class="spinner"></div> Carregando...</div>`;
+
+  const d = await fetch(`/api/denuncia/${id}`).then(r => r.json());
+
+  if (d.erro) {
+    c.innerHTML = `<div class="empty"><div class="icon">❌</div><p>${d.erro}</p></div>`;
+    return;
+  }
+
+  c.innerHTML = `
+    <a href="/denuncias" class="back-btn">← Voltar para lista</a>
+
+    <div class="detalhe-grid">
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+            <div>
+              <div class="card-label">Protocolo</div>
+              <div class="protocolo" style="font-size:20px;margin-top:4px">${d.protocolo}</div>
+            </div>
+            <div>${badgeHTML(d.status)}</div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+            <div class="info-block">
+              <div class="info-label">Módulo</div>
+              <div class="info-value" style="font-weight:600">${d.modulo || '—'}</div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Tipo / Subcategoria</div>
+              <div class="info-value">${d.subcategoria || '—'}</div>
+            </div>
+            <div class="info-block" style="grid-column:1/-1">
+              <div class="info-label">Descrição</div>
+              <div class="info-value">${d.descricao || '—'}</div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Local</div>
+              <div class="info-value">${d.local || '—'}</div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Data da ocorrência</div>
+              <div class="info-value">${d.data_ocorrencia || '—'}</div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">Registrado em</div>
+              <div class="info-value">${formatDate(d.criado_em)}</div>
+            </div>
+            <div class="info-block">
+              <div class="info-label">WhatsApp</div>
+              <div class="info-value">${d.anonimo ? '🔒 Anônimo' : (d.numero_whatsapp || '—')}</div>
+            </div>
+          </div>
+        </div>
+
+        ${d.foto_url ? (() => {
+            let preview = null, mediaId = null;
+            try {
+              const parsed = JSON.parse(d.foto_url);
+              preview = parsed.preview;
+              mediaId = parsed.id;
+            } catch(e) {
+              // fallback: valor direto
+              if (d.foto_url.startsWith('data:')) preview = d.foto_url;
+              else mediaId = d.foto_url;
+            }
+            // Sempre prefere a imagem original pelo ID (melhor qualidade)
+            const src = mediaId
+              ? `/api/foto/${encodeURIComponent(mediaId)}`
+              : preview || null;
+            return src ? `
+          <div class="card">
+            <div class="info-label" style="margin-bottom:8px">Foto enviada</div>
+            <img src="${src}" class="foto-preview" alt="Foto da denúncia"
+                 onerror="this.src=''; this.style.display='none'; this.nextElementSibling.style.display='block'"
+                 style="width:100%;max-height:500px;object-fit:contain;background:#0F172A;border-radius:8px">
+            <div style="display:none;color:var(--text-dim);font-size:13px;padding:24px;text-align:center">
+              📷 Foto não disponível — <a href="${src}" target="_blank" style="color:var(--blue-light)">tentar abrir diretamente</a>
+            </div>
+          </div>` : '';
+          })() : ''}
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="status-select-wrap">
+            <label>Alterar status</label>
+            <select id="novo-status">
+              <option value="pendente"   ${d.status==='pendente'   ?'selected':''}>🟡 Pendente</option>
+              <option value="em_analise" ${d.status==='em_analise' ?'selected':''}>🔵 Em análise</option>
+              <option value="resolvido"  ${d.status==='resolvido'  ?'selected':''}>🟢 Resolvido</option>
+              <option value="arquivado"  ${d.status==='arquivado'  ?'selected':''}>⚫ Arquivado</option>
+            </select>
+            <button class="btn btn-primary" onclick="salvarStatus(${d.id})">Salvar status</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:12px">
+          <div class="info-label" style="margin-bottom:12px">Resumo</div>
+          <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-dim)">ID</span>
+              <span style="font-family:'DM Mono',monospace">#${d.id}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-dim)">Foto</span>
+              <span>${d.foto_url ? '✅ Sim' : '❌ Não'}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-dim)">Anônimo</span>
+              <span>${d.anonimo ? '✅ Sim' : '❌ Não'}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function salvarStatus(id) {
+  const status = document.getElementById('novo-status').value;
+  const res = await fetch(`/api/denuncia/${id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status })
+  }).then(r => r.json());
+
+  if (res.ok) toast('Status atualizado com sucesso!', 'success');
+  else toast('Erro ao atualizar status.', 'error');
+}
+
+init();
+</script>
+</body>
+</html>
