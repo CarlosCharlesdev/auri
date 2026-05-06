@@ -153,13 +153,31 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_denuncias_modulo    ON denuncias(modulo)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_denuncias_criado_em ON denuncias(criado_em)")
 
-def gerar_protocolo():
+SIGLAS_MODULO = {
+    "Infraestrutura":        "INF",
+    "Meio Ambiente":         "MEA",
+    "Dano ao Patrimônio":    "DPA",
+    "Saúde Pública":         "SAP",
+    "Mobilidade / Trânsito": "MOB",
+    "Serviços Públicos":     "SRP",
+    "Outros":                "OUT",
+}
+
+def gerar_protocolo(modulo: str = "OUT"):
+    import unicodedata
+    sigla = SIGLAS_MODULO.get(modulo)
+    if not sigla:
+        # Fallback: pega primeiras letras de cada palavra
+        texto = unicodedata.normalize("NFD", modulo)
+        texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+        sigla = "".join(p[0].upper() for p in texto.split() if p)[:3]
     ano = datetime.now().year
-    num = random.randint(10000, 99999)
-    return f"DEN-{ano}-{num}"
+    num = str(random.randint(100, 999))
+    seq = str(random.randint(10, 99))
+    return f"{sigla}-{num}-{seq}"
 
 async def registrar_denuncia(dados: dict) -> str:
-    protocolo = gerar_protocolo()
+    protocolo = gerar_protocolo(dados.get("modulo", "Outros"))
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO denuncias
@@ -392,6 +410,40 @@ async def processar_audio(numero: str, audio_url: str):
 
     print(f"[AUDIO] Transcrito: {texto}")
 
+    # ==============================
+    # 🔍 CONSULTA DE PROTOCOLO POR ÁUDIO
+    # ==============================
+    import re as _re
+    protocolo_match = _re.search(r'\b([A-Z]{2,4}-\d{2,4}-\d{2,4})\b', texto.upper())
+    if protocolo_match:
+        if numero in sessoes:
+            del sessoes[numero]
+        protocolo_buscado = protocolo_match.group(1)
+        print(f"[AUDIO] Consulta de protocolo: {protocolo_buscado}")
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM denuncias WHERE UPPER(protocolo) = $1", protocolo_buscado
+            )
+        if row:
+            status_map = {
+                "pendente":   "pendente, aguardando analise",
+                "em_analise": "em analise, sendo apurado",
+                "resolvido":  "resolvido, problema tratado",
+                "arquivado":  "arquivado",
+            }
+            status_txt = status_map.get(row["status"], row["status"])
+            await falar(numero,
+                f"Consulta do protocolo {row['protocolo']}. "
+                f"Modulo: {row['modulo']}. "
+                f"Tipo: {row['subcategoria']}. "
+                f"Local: {row['local']}. "
+                f"Status: {status_txt}. "
+                f"Se tiver duvidas, entre em contato com a prefeitura.")
+        else:
+            await falar(numero,
+                f"Protocolo {protocolo_buscado} nao encontrado. Verifique o numero e tente novamente.")
+        return
+
     # Marca preferência de áudio na sessão
     if numero not in sessoes:
         sessoes[numero] = {}
@@ -410,7 +462,7 @@ async def processar_audio(numero: str, audio_url: str):
         await falar(numero, "Ola! Sou o assistente de denuncias. Pode me contar o que esta acontecendo?")
     else:
         sessoes[numero].update({
-            "etapa":        "CONFIRMANDO_CLASSIFICACAO",
+            "etapa":        "AGUARDANDO_LOCAL",
             "descricao":    texto,
             "modulo":       classificacao["modulo"],
             "subcategoria": classificacao["subcategoria"]
@@ -745,9 +797,67 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     print(f"Mensagem de {numero}: {texto}")
 
+    # ==============================
+    # 🔍 CONSULTA DE PROTOCOLO — verifica ANTES da sessão
+    # ==============================
+    import re as _re
+    protocolo_match = _re.search(r'\b([A-Z]{2,4}-\d{2,4}-\d{2,4})\b', texto.upper())
+    if protocolo_match:
+        # Cancela sessão ativa se houver (pessoa desistiu pra consultar)
+        if numero in sessoes:
+            del sessoes[numero]
+        protocolo_buscado = protocolo_match.group(1)
+        print(f"Consulta de protocolo: {protocolo_buscado}")
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM denuncias WHERE UPPER(protocolo) = $1", protocolo_buscado
+            )
+        if row:
+            status_map = {
+                "pendente":   "🟡 Pendente — aguardando análise",
+                "em_analise": "🔵 Em análise — sendo apurado",
+                "resolvido":  "🟢 Resolvido — problema tratado",
+                "arquivado":  "⚫ Arquivado",
+            }
+            status_txt = status_map.get(row["status"], row["status"])
+            await enviar_mensagem(numero,
+                f"🔍 *Consulta de protocolo*\n\n"
+                f"🔖 Protocolo: *{row['protocolo']}*\n"
+                f"📂 Módulo: {row['modulo']}\n"
+                f"🏷️ Tipo: {row['subcategoria']}\n"
+                f"📍 Local: {row['local']}\n"
+                f"📅 Registrado em: {row['data_ocorrencia']}\n"
+                f"📊 Status: {status_txt}\n\n"
+                f"Se tiver dúvidas, entre em contato com a prefeitura.")
+        else:
+            await enviar_mensagem(numero,
+                f"❌ Protocolo *{protocolo_buscado}* não encontrado.\n"
+                f"Verifique o número e tente novamente.")
+        return {"status": "ok"}
+
     if numero in sessoes:
         await processar_fluxo(numero, texto)
         return {"status": "ok"}
+
+    # ==============================
+    # 👋 MENSAGENS DE ENCERRAMENTO — ignora
+    # ==============================
+    import unicodedata as _ud
+    def _norm(t):
+        t = t.lower().strip()
+        t = _ud.normalize("NFD", t)
+        return "".join(c for c in t if _ud.category(c) != "Mn")
+
+    _encerramentos = [
+        "ok", "obrigado", "obrigada", "valeu", "vlw", "tmj", "ok obrigado",
+        "ok obrigada", "ok valeu", "entendido", "certo", "tudo bem",
+        "perfeito", "otimo", "ótimo", "show", "blz", "beleza", "ate mais",
+        "tchau", "adeus", "flw", "falou", "boa noite", "bom dia", "boa tarde",
+        "ok vlw", "ok valeu", "muito obrigado", "muito obrigada"
+    ]
+    if _norm(texto) in _encerramentos:
+        return {"status": "ok"}
+
 
     classificacao = await classificar(texto)
 
@@ -757,7 +867,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             "Olá! 👋 Sou o assistente de denúncias.\n\nPode me contar o que está acontecendo?")
     else:
         sessoes[numero] = {
-            "etapa":        "CONFIRMANDO_CLASSIFICACAO",
+            "etapa":        "AGUARDANDO_LOCAL",
             "descricao":    texto,
             "modulo":       classificacao["modulo"],
             "subcategoria": classificacao["subcategoria"]
