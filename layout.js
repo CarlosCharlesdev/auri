@@ -8,7 +8,7 @@ async function renderLayout(pageTitle, pageSub, activeNav) {
     <div class="layout">
       <aside class="sidebar">
         <div class="sidebar-logo">
-          <div class="brand">Zap<span>AI</span></div>
+          <div class="brand">Tuca<span>AI</span></div>
           <div class="subtitle">Sistema de Denúncias</div>
         </div>
         <nav class="sidebar-nav">

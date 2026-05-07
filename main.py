@@ -72,11 +72,14 @@ def detectar_correcao(mensagem: str) -> str | None:
     texto = unicodedata.normalize("NFD", texto)
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
 
-    if any(p in texto for p in ["local", "endereco", "endereço", "rua", "bairro", "lugar", "logradouro"]):
+    # Só detecta "local" se a pessoa EXPLICITAMENTE quer mudar o endereço
+    if any(p in texto for p in ["mudar o local", "mudar endereco", "alterar local",
+                                  "alterar endereco", "corrigir local", "novo local",
+                                  "errei o local", "errei a rua", "errei o endereco"]):
         return "local"
-    if any(p in texto for p in ["foto", "imagem", "print", "fotografia", "picture"]):
+    if any(p in texto for p in ["foto", "imagem", "print", "fotografia"]):
         return "foto"
-    # Se descreve outro problema = quer corrigir o tipo
+    # Qualquer outra coisa = quer corrigir a descricao/tipo
     return "tipo"
 
 # ==============================
@@ -145,6 +148,7 @@ async def init_db():
                 data_ocorrencia  VARCHAR(100),
                 anonimo          BOOLEAN      DEFAULT FALSE,
                 foto_url         TEXT,
+                urgente          BOOLEAN      DEFAULT FALSE,
                 status           VARCHAR(20)  DEFAULT 'pendente',
                 criado_em        TIMESTAMP    DEFAULT NOW()
             )
@@ -152,6 +156,52 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_denuncias_status    ON denuncias(status)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_denuncias_modulo    ON denuncias(modulo)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_denuncias_criado_em ON denuncias(criado_em)")
+
+# ==============================
+# 🚨 DETECÇÃO DE EMERGÊNCIA
+# ==============================
+EMERGENCIAS = {
+    "violencia_domestica": {
+        "palavras": [
+            "apanhando", "me bate", "me bateu", "marido bate", "companheiro bate",
+            "namorado bate", "esposo bate", "violencia domestica", "violencia domestica",
+            "me agride", "me agrediu", "me socorre", "socorro mulher", "lei maria da penha",
+            "me ameacando", "me ameacando", "ameaca de morte", "ameaca de morte",
+            "feminicidio", "feminicidio", "mulher apanhando", "ele me bate",
+            "ela me bate", "meu marido me", "meu namorado me", "meu companheiro me",
+            "ta me batendo", "esta me batendo", "to apanhando", "estou apanhando"
+        ],
+        "modulo": "Violencia Domestica",
+        "subcategoria": "Violencia contra a mulher",
+        "sigla": "VDM",
+        "resposta": (
+            "🚨 *ATENÇÃO — SITUAÇÃO DE RISCO DETECTADA*\n\n"
+            "Se você estiver em perigo imediato, ligue agora:\n\n"
+            "📞 *190* — Polícia Militar\n"
+            "📞 *180* — Central de Atendimento à Mulher\n"
+            "📞 *192* — SAMU\n\n"
+            "Sua denúncia será registrada como *URGENTE* e encaminhada.\n\n"
+            "📍 Me informe o endereço onde está ocorrendo."
+        ),
+        "falar": (
+            "Atencao. Detectamos uma situacao de risco. "
+            "Se voce estiver em perigo, ligue agora 190 para a policia "
+            "ou 180 para a central de atendimento a mulher. "
+            "Vou registrar sua denuncia como urgente. "
+            "Me informe o endereco onde esta ocorrendo."
+        )
+    }
+}
+
+def detectar_emergencia(mensagem: str) -> dict | None:
+    import unicodedata
+    texto = mensagem.lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    for tipo, dados in EMERGENCIAS.items():
+        if any(p in texto for p in dados["palavras"]):
+            return dados
+    return None
 
 SIGLAS_MODULO = {
     "Infraestrutura":        "INF",
@@ -163,9 +213,9 @@ SIGLAS_MODULO = {
     "Outros":                "OUT",
 }
 
-def gerar_protocolo(modulo: str = "OUT"):
+def gerar_protocolo(modulo: str = "OUT", sigla_custom: str = None):
     import unicodedata
-    sigla = SIGLAS_MODULO.get(modulo)
+    sigla = sigla_custom or SIGLAS_MODULO.get(modulo)
     if not sigla:
         # Fallback: pega primeiras letras de cada palavra
         texto = unicodedata.normalize("NFD", modulo)
@@ -177,7 +227,8 @@ def gerar_protocolo(modulo: str = "OUT"):
     return f"{sigla}-{num}-{seq}"
 
 async def registrar_denuncia(dados: dict) -> str:
-    protocolo = gerar_protocolo(dados.get("modulo", "Outros"))
+    sigla_custom = dados.get("sigla")
+    protocolo = gerar_protocolo(dados.get("modulo", "Outros"), sigla_custom)
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO denuncias
@@ -194,7 +245,7 @@ async def registrar_denuncia(dados: dict) -> str:
             dados["data_ocorrencia"],
             dados["anonimo"],
             dados.get("foto_url"),
-            "pendente"
+            dados.get("status", "pendente")
         )
     return protocolo
 
@@ -316,10 +367,41 @@ async def classificar(mensagem: str) -> dict:
         print(f"Erro ao classificar: {e}")
         return {"modulo": "Outros", "subcategoria": "Outros", "confianca": "baixa"}
 # ==============================
+# 🔎 FILTRO DE RELEVÂNCIA
+# ==============================
+async def e_denuncia_relevante(mensagem: str) -> bool:
+    """Verifica se a mensagem é uma denúncia urbana real ou fora do escopo."""
+    prompt = (
+        "Você é um filtro para um bot de denúncias urbanas de prefeitura. "
+        "Analise a mensagem e responda APENAS com JSON.\n\n"
+        "Responda verdadeiro se a mensagem for:\n"
+        "- Uma denúncia de problema urbano (buraco, alagamento, lixo, falta de luz, vandalismo, etc)\n"
+        "- Um relato de problema na cidade ou bairro\n"
+        "- Uma situação que envolva serviços públicos, infraestrutura, meio ambiente ou saúde pública\n\n"
+        "Responda falso se for:\n"
+        "- Pergunta sobre preços, produtos ou comida\n"
+        "- Conversa aleatória, piada ou assunto pessoal\n"
+        "- Pedido de informação que não seja sobre problemas urbanos\n"
+        "- Cumprimento sem contexto de denúncia\n\n"
+        f"Mensagem: \"{mensagem}\"\n\n"
+        "Responda SOMENTE: {{\"denuncia\": true}} ou {{\"denuncia\": false}}"
+    )
+    try:
+        import json
+        resposta = await perguntar_ollama(prompt, max_tokens=20)
+        clean = resposta.replace("```json", "").replace("```", "").strip()
+        inicio = clean.find("{")
+        fim = clean.rfind("}") + 1
+        resultado = json.loads(clean[inicio:fim])
+        return resultado.get("denuncia", False)
+    except Exception:
+        return True  # em caso de dúvida, deixa passar
+
+# ==============================
 # 🎙️ PIPELINE DE ÁUDIO
 # ==============================
 async def transcrever_audio(audio_url: str) -> str | None:
-    """Baixa e transcreve o áudio, retorna o texto ou None se falhar."""
+    """Baixa e transcreve o audio, retorna o texto ou None se falhar."""
     try:
         print(f"[AUDIO] Baixando áudio...")
         async with httpx.AsyncClient(timeout=30) as client:
@@ -355,7 +437,7 @@ async def transcrever_audio(audio_url: str) -> str | None:
 
 
 async def texto_para_audio(texto: str) -> str | None:
-    """Converte texto em áudio OGG base64 via edge-tts."""
+    """Converte texto em audio OGG base64 via edge-tts."""
     mp3_path = tempfile.mktemp(suffix=".mp3")
     ogg_path = tempfile.mktemp(suffix=".ogg")
     try:
@@ -383,7 +465,7 @@ async def texto_para_audio(texto: str) -> str | None:
 
 
 async def falar(numero: str, texto: str):
-    """Converte texto em audio e envia — sem emojis nem formatacao."""
+    """Converte texto em audio e envia, sem emojis nem formatacao."""
     audio_b64 = await texto_para_audio(texto)
     if audio_b64:
         await enviar_audio(numero, audio_b64)
@@ -392,7 +474,7 @@ async def falar(numero: str, texto: str):
 
 
 async def responder(numero: str, texto: str):
-    """Responde em áudio se a sessão preferir, senão em texto."""
+    """Responde em audio se a sessao preferir, senao em texto."""
     session = sessoes.get(numero, {})
     if session.get("prefere_audio"):
         audio_b64 = await texto_para_audio(texto)
@@ -411,19 +493,59 @@ async def processar_audio(numero: str, audio_url: str):
     print(f"[AUDIO] Transcrito: {texto}")
 
     # ==============================
+    # 🚨 EMERGÊNCIA POR ÁUDIO
+    # ==============================
+    emergencia = detectar_emergencia(texto)
+    if emergencia:
+        if numero in sessoes:
+            del sessoes[numero]
+        sessoes[numero] = {
+            "etapa":        "AGUARDANDO_LOCAL",
+            "descricao":    texto,
+            "modulo":       emergencia["modulo"],
+            "subcategoria": emergencia["subcategoria"],
+            "urgente":      True,
+            "sigla":        emergencia["sigla"],
+            "prefere_audio": True
+        }
+        await falar(numero, emergencia["falar"])
+        return
+
+    # ==============================
     # 🔍 CONSULTA DE PROTOCOLO POR ÁUDIO
     # ==============================
     import re as _re
-    protocolo_match = _re.search(r'\b([A-Z]{2,4}-\d{2,4}-\d{2,4})\b', texto.upper())
-    if protocolo_match:
+    import unicodedata as _ud2
+
+    def _norm_audio(t):
+        t = t.lower()
+        t = _ud2.normalize("NFD", t)
+        return "".join(c for c in t if _ud2.category(c) != "Mn")
+
+    texto_norm = _norm_audio(texto)
+
+    # Detecta intenção de consulta por palavras-chave
+    palavras_consulta = ["consultar", "consulta", "protocolo", "status", "acompanhar", "situacao", "situação", "andamento"]
+    quer_consultar = any(p in texto_norm for p in palavras_consulta)
+
+    if quer_consultar:
         if numero in sessoes:
             del sessoes[numero]
-        protocolo_buscado = protocolo_match.group(1)
-        print(f"[AUDIO] Consulta de protocolo: {protocolo_buscado}")
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM denuncias WHERE UPPER(protocolo) = $1", protocolo_buscado
-            )
+        # Extrai todos os dígitos da transcrição e monta o protocolo
+        digitos = _re.findall(r'\d+', texto)
+        numeros_juntos = "".join(digitos)
+
+        # Busca no banco por qualquer protocolo que contenha esses números
+        print(f"[AUDIO] Busca por protocolo com dígitos: {numeros_juntos}")
+        if numeros_juntos:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM denuncias WHERE REPLACE(REPLACE(protocolo, '-', ''), ' ', '') LIKE $1 ORDER BY criado_em DESC LIMIT 1",
+                    f"%{numeros_juntos}%"
+                )
+        else:
+            row = None
+
         if row:
             status_map = {
                 "pendente":   "pendente, aguardando analise",
@@ -441,7 +563,8 @@ async def processar_audio(numero: str, audio_url: str):
                 f"Se tiver duvidas, entre em contato com a prefeitura.")
         else:
             await falar(numero,
-                f"Protocolo {protocolo_buscado} nao encontrado. Verifique o numero e tente novamente.")
+                "Nao encontrei nenhum protocolo com esses numeros. "
+                "Verifique o numero e tente novamente, ou envie por texto para maior precisao.")
         return
 
     # Marca preferência de áudio na sessão
@@ -489,8 +612,16 @@ async def processar_fluxo(numero: str, mensagem: str):
         session["descricao"] = mensagem
 
         if classificacao["confianca"] == "baixa":
-            await enviar_mensagem(numero,
-                "Pode me dar mais detalhes? 🙏\n\nPor exemplo: o que está acontecendo, onde é e há quanto tempo?")
+            texto_lower = mensagem.lower()
+            perguntas_modulo = ["modulo", "módulo", "categoria", "quais categorias",
+                                 "mudar modulo", "trocar modulo", "escolher modulo"]
+            if any(p in texto_lower for p in perguntas_modulo):
+                await enviar_mensagem(numero,
+                    "📂 O módulo é definido automaticamente de acordo com o problema que você descrever — não precisa escolher!\n\n"
+                    "Me conte o que está acontecendo e eu identifico a categoria certa. 😊")
+            else:
+                await enviar_mensagem(numero,
+                    "Pode me dar mais detalhes? 🙏\n\nPor exemplo: o que está acontecendo, onde é e há quanto tempo?")
         else:
             session["modulo"] = classificacao["modulo"]
             session["subcategoria"] = classificacao["subcategoria"]
@@ -563,7 +694,9 @@ async def processar_fluxo(numero: str, mensagem: str):
                 "local":           session["local"],
                 "data_ocorrencia": datetime.now().strftime("%d/%m/%Y %H:%M"),
                 "anonimo":         False,
-                "foto_url":        session.get("foto_url")
+                "foto_url":        session.get("foto_url"),
+                "sigla":           session.get("sigla"),
+                "status":          "urgente" if session.get("urgente") else "pendente"
             })
             del sessoes[numero]
             await enviar_mensagem(numero,
@@ -798,6 +931,26 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     print(f"Mensagem de {numero}: {texto}")
 
     # ==============================
+    # 🚨 DETECÇÃO DE EMERGÊNCIA — máxima prioridade
+    # ==============================
+    emergencia = detectar_emergencia(texto)
+    if emergencia:
+        # Cancela sessão se houver
+        if numero in sessoes:
+            del sessoes[numero]
+        # Inicia sessão de emergência direto no local
+        sessoes[numero] = {
+            "etapa":        "AGUARDANDO_LOCAL",
+            "descricao":    texto,
+            "modulo":       emergencia["modulo"],
+            "subcategoria": emergencia["subcategoria"],
+            "urgente":      True,
+            "sigla":        emergencia["sigla"]
+        }
+        await enviar_mensagem(numero, emergencia["resposta"])
+        return {"status": "ok"}
+
+    # ==============================
     # 🔍 CONSULTA DE PROTOCOLO — verifica ANTES da sessão
     # ==============================
     import re as _re
@@ -848,6 +1001,45 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         t = _ud.normalize("NFD", t)
         return "".join(c for c in t if _ud.category(c) != "Mn")
 
+    # ==============================
+    # ❓ PERGUNTAS SOBRE OS CAMPOS
+    # ==============================
+    perguntas_campos = {
+        ("o que e modulo", "o que é modulo", "o que significa modulo", "pra que serve modulo", "modulo e o que"): (
+            "📂 *Módulo* é a grande área da sua denúncia. Exemplo: Infraestrutura, Meio Ambiente, Saúde Pública, etc.\n\n"
+            "Ele é identificado automaticamente pela IA de acordo com o que você descrever. Não precisa escolher!"
+        ),
+        ("o que e tipo", "o que é tipo", "o que significa tipo", "pra que serve tipo", "tipo e o que", "subcategoria"): (
+            "🏷️ *Tipo* é a subcategoria específica dentro do módulo. Exemplo: dentro de Infraestrutura, o tipo pode ser *Alagamento*, *Buraco na via*, *Iluminação pública*, etc.\n\n"
+            "Também é definido automaticamente pela IA!"
+        ),
+        ("o que e local", "o que é local", "o que significa local", "pra que serve local", "local e o que"): (
+            "📍 *Local* é o endereço ou ponto de referência onde o problema está ocorrendo. Exemplo: *Rua das Flores, próximo ao mercado X*."
+        ),
+        ("o que e foto", "o que é foto", "pra que serve foto", "foto e obrigatorio", "foto é obrigatorio"): (
+            "📸 *Foto* é opcional! Se você tiver uma imagem do problema, ela ajuda muito na apuração da denúncia. Mas pode pular se não tiver."
+        ),
+        ("o que e protocolo", "o que é protocolo", "pra que serve protocolo", "protocolo e o que"): (
+            "🔖 *Protocolo* é o número único gerado após o registro da sua denúncia. Com ele você pode acompanhar o status — é só me enviar o número quando quiser consultar!"
+        ),
+        ("o que e descricao", "o que é descricao", "o que é descrição", "descricao e o que", "descrição é o que"): (
+            "📝 *Descrição* é o relato do problema que você me enviou. É o que você contou sobre o que está acontecendo."
+        ),
+        ("o que e status", "o que é status", "status e o que", "o que significa status"): (
+            "📊 *Status* indica em que fase está sua denúncia:\n\n"
+            "🟡 *Pendente* — aguardando análise\n"
+            "🔵 *Em análise* — sendo apurado\n"
+            "🟢 *Resolvido* — problema tratado\n"
+            "⚫ *Arquivado* — encerrado sem resolução"
+        ),
+    }
+
+    texto_norm_campo = _norm(texto)
+    for chaves, resposta_campo in perguntas_campos.items():
+        if any(c in texto_norm_campo for c in chaves):
+            await enviar_mensagem(numero, resposta_campo)
+            return {"status": "ok"}
+
     _encerramentos = [
         "ok", "obrigado", "obrigada", "valeu", "vlw", "tmj", "ok obrigado",
         "ok obrigada", "ok valeu", "entendido", "certo", "tudo bem",
@@ -859,12 +1051,62 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ok"}
 
 
+    # Filtro de relevância — verifica se é denúncia real antes de classificar
+    relevante = await e_denuncia_relevante(texto)
+    if not relevante:
+        texto_lower = texto.lower()
+        perguntas_bot = ["o que voce faz", "o que você faz", "pra que serve", "para que serve",
+                         "como funciona", "o que e isso", "o que é isso", "me ajuda", "ajuda",
+                         "oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "hey", "hi"]
+        perguntas_modulo = ["modulo", "módulo", "categoria", "quais categorias",
+                             "quais modulos", "quais módulos", "mudar modulo", "trocar modulo"]
+
+        if any(p in texto_lower for p in perguntas_modulo):
+            await enviar_mensagem(numero,
+                "📂 *Sobre os módulos de denúncia*\n\n"
+                "Os módulos são definidos automaticamente pela IA de acordo com o problema que você descrever. Não é necessário escolher!\n\n"
+                "Basta me contar o que está acontecendo e eu identifico a categoria correta:\n\n"
+                "🏗️ *Infraestrutura* — buracos, alagamentos, iluminação...\n"
+                "🌿 *Meio Ambiente* — lixo irregular, poluição...\n"
+                "🏛️ *Dano ao Patrimônio* — pichação, vandalismo...\n"
+                "🏥 *Saúde Pública* — dengue, esgoto a céu aberto...\n"
+                "🚗 *Mobilidade / Trânsito* — semáforo, sinalização...\n"
+                "⚙️ *Serviços Públicos* — falta de água, luz, coleta...\n\n"
+                "Me conte o problema e cuido do resto! 😊")
+        elif any(p in texto_lower for p in perguntas_bot):
+            sessoes[numero] = {"etapa": "AGUARDANDO_DESCRICAO"}
+            await enviar_mensagem(numero,
+                "Olá! 👋 Sou o *assistente de denúncias urbanas*.\n\n"
+                "Estou aqui para registrar problemas da sua cidade como:\n"
+                "• Buracos e alagamentos\n"
+                "• Falta de luz ou água\n"
+                "• Lixo irregular\n"
+                "• Pichação e vandalismo\n"
+                "• E muito mais!\n\n"
+                "Me conte o que está acontecendo que registro sua denúncia. 🙏")
+        else:
+            # Limpa sessão se existir
+            if numero in sessoes:
+                del sessoes[numero]
+            await enviar_mensagem(numero,
+                "⚠️ Esse assunto está fora do meu escopo.\n\n"
+                "Sou o *assistente de denúncias urbanas* — registro apenas problemas de infraestrutura e serviços públicos da cidade, como:\n\n"
+                "🕳️ Buracos e alagamentos\n"
+                "💡 Falta de energia ou iluminação\n"
+                "💧 Falta de água\n"
+                "🗑️ Descarte irregular de lixo\n"
+                "🏚️ Vandalismo e pichação\n"
+                "🦟 Focos de dengue\n"
+                "🚦 Problemas no trânsito\n\n"
+                "Se tiver algum desses problemas para denunciar, é só me contar! 🙏")
+        return {"status": "ok"}
+
     classificacao = await classificar(texto)
 
     if classificacao["confianca"] == "baixa":
         sessoes[numero] = {"etapa": "AGUARDANDO_DESCRICAO"}
-        await responder(numero,
-            "Olá! 👋 Sou o assistente de denúncias.\n\nPode me contar o que está acontecendo?")
+        await enviar_mensagem(numero,
+            "Olá! 👋 Sou o assistente de denúncias urbanas.\n\nPode me contar o problema que deseja denunciar?")
     else:
         sessoes[numero] = {
             "etapa":        "AGUARDANDO_LOCAL",
