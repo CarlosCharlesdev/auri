@@ -9,13 +9,81 @@
 <body>
 <script src="/layout.js"></script>
 <script>
+function renderMidia(fotoUrl) {
+  if (!fotoUrl) return '';
+
+  let preview = null, mediaId = null, mimeType = '';
+
+  try {
+    const parsed = JSON.parse(fotoUrl);
+    preview  = parsed.preview  || null;
+    mediaId  = parsed.id       || null;
+    mimeType = parsed.mime_type || '';
+  } catch(e) {
+    if (fotoUrl.startsWith('data:')) preview = fotoUrl;
+    else mediaId = fotoUrl;
+  }
+
+  const isVideo = mimeType.startsWith('video') ||
+    (mediaId && (mediaId.startsWith('mp4') || mediaId.startsWith('video')));
+
+  // Sempre usa o proxy com o ID original pra qualidade máxima
+  // Preview só como fallback se não tiver ID
+  let src = null;
+  if (mediaId) {
+    src = `/api/foto/${encodeURIComponent(mediaId)}`;
+  } else if (preview) {
+    src = preview; // fallback: miniatura base64
+  }
+
+  if (!src) return '';
+
+  const label = isVideo ? 'Vídeo enviado' : 'Foto enviada';
+
+  if (isVideo) {
+    return `
+      <div class="card">
+        <div class="info-label" style="margin-bottom:8px">${label}</div>
+        <video controls style="width:100%;max-height:500px;border-radius:8px;background:#000;border:1px solid var(--border)">
+          <source src="${src}" type="${mimeType}">
+          Seu navegador não suporta vídeo.
+          <a href="${src}" target="_blank">Abrir diretamente</a>
+        </video>
+      </div>`;
+  }
+
+  return `
+    <div class="card">
+      <div class="info-label" style="margin-bottom:8px">${label}</div>
+      <img src="${src}"
+           alt="Foto da denúncia"
+           id="foto-img"
+           style="width:100%;max-height:500px;object-fit:contain;background:var(--surface2);border-radius:8px;display:block"
+           onerror="
+             const img = document.getElementById('foto-img');
+             const err = document.getElementById('foto-err');
+             const prev = '${preview || ''}';
+             if (prev && img.src !== prev) {
+               img.src = prev;
+             } else {
+               img.style.display='none';
+               err.style.display='flex';
+             }
+           ">
+      <div id="foto-err" style="display:none;align-items:center;justify-content:center;padding:24px;color:var(--text-dim);font-size:13px;gap:6px">
+        📷 Foto não disponível
+        ${mediaId ? `— <a href="/api/foto/${encodeURIComponent(mediaId)}" target="_blank" style="color:var(--orange)">abrir diretamente</a>` : ''}
+      </div>
+    </div>`;
+}
+
 async function init() {
   await renderLayout('Detalhe', 'Informações da denúncia', 'denuncias');
 
   const id = location.pathname.split('/').pop();
   const c  = document.getElementById('content');
 
-  c.innerHTML = `<div class="loading"><div class="spinner"></div> Carregando...</div>`;
+  c.innerHTML = '<div class="loading"><div class="spinner"></div> Carregando...</div>';
 
   const d = await fetch(`/api/denuncia/${id}`).then(r => r.json());
 
@@ -70,42 +138,7 @@ async function init() {
           </div>
         </div>
 
-        ${d.foto_url ? (() => {
-            let preview = null, mediaId = null;
-            try {
-              const parsed = JSON.parse(d.foto_url);
-              preview = parsed.preview;
-              mediaId = parsed.id;
-            } catch(e) {
-              // fallback: valor direto
-              if (d.foto_url.startsWith('data:')) preview = d.foto_url;
-              else mediaId = d.foto_url;
-            }
-            // Sempre prefere a imagem original pelo ID (melhor qualidade)
-            const src = mediaId
-              ? `/api/foto/${encodeURIComponent(mediaId)}`
-              : preview || null;
-            // Detecta se é vídeo pelo ID ou mime_type
-            const isVideo = mediaId && (mediaId.startsWith('mp4') || mediaId.startsWith('video') ||
-                            (parsed && parsed.mime_type && parsed.mime_type.startsWith('video')));
-            return src ? `
-          <div class="card">
-            <div class="info-label" style="margin-bottom:8px">${isVideo ? 'Vídeo enviado' : 'Foto enviada'}</div>
-            ${isVideo ? `
-              <video controls style="width:100%;max-height:500px;border-radius:8px;background:#000;border:1px solid var(--border)">
-                <source src="${src}">
-                Seu navegador não suporta vídeo.
-              </video>
-            ` : `
-              <img src="${src}" class="foto-preview" alt="Foto da denúncia"
-                   onerror="this.style.display='none';this.nextElementSibling.style.display='block'"
-                   style="width:100%;max-height:500px;object-fit:contain;background:var(--surface2);border-radius:8px">
-              <div style="display:none;color:var(--text-dim);font-size:13px;padding:24px;text-align:center">
-                📷 Mídia não disponível — <a href="${src}" target="_blank" style="color:var(--blue)">abrir diretamente</a>
-              </div>
-            `}
-          </div>` : '';
-          })() : ''}
+        ${renderMidia(d.foto_url)}
       </div>
 
       <div>
@@ -113,10 +146,10 @@ async function init() {
           <div class="status-select-wrap">
             <label>Alterar status</label>
             <select id="novo-status">
-              <option value="pendente"   ${d.status==='pendente'   ?'selected':''}>🟡 Pendente</option>
-              <option value="em_analise" ${d.status==='em_analise' ?'selected':''}>🔵 Em análise</option>
-              <option value="resolvido"  ${d.status==='resolvido'  ?'selected':''}>🟢 Resolvido</option>
-              <option value="arquivado"  ${d.status==='arquivado'  ?'selected':''}>⚫ Arquivado</option>
+              <option value="pendente"   ${d.status === 'pendente'   ? 'selected' : ''}>🟡 Pendente</option>
+              <option value="em_analise" ${d.status === 'em_analise' ? 'selected' : ''}>🔵 Em análise</option>
+              <option value="resolvido"  ${d.status === 'resolvido'  ? 'selected' : ''}>🟢 Resolvido</option>
+              <option value="arquivado"  ${d.status === 'arquivado'  ? 'selected' : ''}>⚫ Arquivado</option>
             </select>
             <button class="btn btn-primary" onclick="salvarStatus(${d.id})">Salvar status</button>
           </div>
@@ -127,10 +160,10 @@ async function init() {
           <div style="display:flex;flex-direction:column;gap:8px;font-size:13px">
             <div style="display:flex;justify-content:space-between">
               <span style="color:var(--text-dim)">ID</span>
-              <span style="font-family:'DM Mono',monospace">#${d.id}</span>
+              <span style="font-family:'JetBrains Mono',monospace">#${d.id}</span>
             </div>
             <div style="display:flex;justify-content:space-between">
-              <span style="color:var(--text-dim)">Foto</span>
+              <span style="color:var(--text-dim)">Mídia</span>
               <span>${d.foto_url ? '✅ Sim' : '❌ Não'}</span>
             </div>
             <div style="display:flex;justify-content:space-between">
