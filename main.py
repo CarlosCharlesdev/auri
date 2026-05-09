@@ -112,7 +112,9 @@ async def lifespan(app: FastAPI):
     global db_pool, whisper_model
 
     print("Carregando Whisper small (GPU)...")
-    whisper_model = whisper.load_model("small", device="cuda")
+    device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    print(f"Usando device: {device}")
+    whisper_model = whisper.load_model("small", device=device)
     print("✅ Whisper pronto!")
 
     print("Conectando ao banco...")
@@ -272,6 +274,43 @@ async def enviar_audio(numero: str, audio_b64: str):
             headers={"Authorization": f"Bearer {WHAPI_TOKEN}"}
         )
         print(f"[AUDIO] Resposta whapi envio: {r.status_code} {r.text[:200]}")
+
+# ==============================
+# 📍 GEOCODING (Nominatim / OpenStreetMap)
+# ==============================
+async def geocodificar(lat: float, lon: float) -> str:
+    """Converte lat/lon em endereco legivel via Nominatim."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "json", "addressdetails": 1},
+                headers={"User-Agent": "TucaAI-Denuncias/1.0"}
+            )
+        data = r.json()
+        addr = data.get("address", {})
+
+        # Monta endereço completo
+        partes = []
+        rua = addr.get("road") or addr.get("pedestrian") or addr.get("path")
+        numero = addr.get("house_number")
+        bairro = addr.get("suburb") or addr.get("neighbourhood") or addr.get("quarter")
+        cidade = addr.get("city") or addr.get("town") or addr.get("municipality")
+
+        if rua:
+            partes.append(rua + (f", {numero}" if numero else ""))
+        if bairro:
+            partes.append(bairro)
+        if cidade:
+            partes.append(cidade)
+
+        if partes:
+            return ", ".join(partes)
+        # Fallback: display_name do Nominatim
+        return data.get("display_name", f"{lat}, {lon}")
+    except Exception as e:
+        print(f"[GEO] Erro ao geocodificar: {e}")
+        return f"{lat}, {lon}"
 
 # ==============================
 # 🧠 OLLAMA
@@ -592,7 +631,7 @@ async def processar_audio(numero: str, audio_url: str):
         })
         await falar(numero,
             f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
-            f"Qual o endereco ou local onde aconteceu?")
+            f"Onde aconteceu? Voce pode compartilhar sua localizacao pelo WhatsApp ou falar o endereco.")
 
 # ==============================
 # 📝 FLUXO TEXTO (com emojis e formatação)
@@ -629,14 +668,14 @@ async def processar_fluxo(numero: str, mensagem: str):
             await enviar_mensagem(numero,
                 f"Entendi! Vou registrar uma denúncia de:\n"
                 f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-                f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
+                f"📍 Onde aconteceu?\n\nCompartilhe sua 📌 *localização pelo WhatsApp* ou digite o endereço (rua, bairro ou ponto de referência)")
 
     elif etapa == "CONFIRMANDO_CLASSIFICACAO":
         resp = mensagem.strip().lower()
         if resp == "sim":
             session["etapa"] = "AGUARDANDO_LOCAL"
             await enviar_mensagem(numero,
-                "📍 Qual o endereço ou local onde aconteceu?\n(rua, bairro ou ponto de referência)")
+                "📍 Onde aconteceu?\n\nCompartilhe sua 📌 *localização pelo WhatsApp* ou digite o endereço (rua, bairro ou ponto de referência)")
         elif resp in ("não", "nao"):
             session["etapa"] = "CORRIGINDO_CLASSIFICACAO"
             await enviar_mensagem(numero,
@@ -658,7 +697,7 @@ async def processar_fluxo(numero: str, mensagem: str):
             await enviar_mensagem(numero,
                 f"Entendi! Vou registrar uma denúncia de:\n"
                 f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-                f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
+                f"📍 Onde aconteceu?\n\nCompartilhe sua 📌 *localização pelo WhatsApp* ou digite o endereço (rua, bairro ou ponto de referência)")
 
     elif etapa == "AGUARDANDO_LOCAL":
         resp = mensagem.strip().lower()
@@ -760,13 +799,13 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
             session["etapa"] = "AGUARDANDO_LOCAL"
             await falar(numero,
                 f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
-                f"Qual o endereco ou local onde aconteceu?")
+                f"Onde aconteceu? Voce pode compartilhar sua localizacao pelo WhatsApp ou falar o endereco.")
 
     elif etapa == "CONFIRMANDO_CLASSIFICACAO":
         resp = normalizar_resposta(mensagem)
         if resp == "sim":
             session["etapa"] = "AGUARDANDO_LOCAL"
-            await falar(numero, "Qual o endereco ou local onde aconteceu? Pode falar o nome da rua, bairro ou um ponto de referencia.")
+            await falar(numero, "Onde aconteceu? Voce pode compartilhar sua localizacao pelo WhatsApp ou falar o endereco.")
         elif resp in ("nao", "n"):
             session["etapa"] = "CORRIGINDO_CLASSIFICACAO"
             await falar(numero, "Sem problema. Me descreva melhor o que esta acontecendo que vou identificar novamente.")
@@ -785,7 +824,7 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
             session["etapa"] = "AGUARDANDO_LOCAL"
             await falar(numero,
                 f"Identificamos uma denuncia de {classificacao['modulo']}, sobre {classificacao['subcategoria']}. "
-                f"Qual o endereco ou local onde aconteceu?")
+                f"Onde aconteceu? Voce pode compartilhar sua localizacao pelo WhatsApp ou falar o endereco.")
 
     elif etapa == "AGUARDANDO_LOCAL":
         resp = normalizar_resposta(mensagem)
@@ -871,8 +910,34 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
     numero = msg.get("from")
 
-    # 🖼️ IMAGEM — salva na sessão se estiver aguardando foto
     tipo = msg.get("type")
+
+    # 📍 LOCALIZAÇÃO — converte lat/lon em endereço
+    if tipo == "location":
+        if numero in sessoes and sessoes[numero].get("etapa") == "AGUARDANDO_LOCAL":
+            loc = msg.get("location") or {}
+            lat = loc.get("latitude")
+            lon = loc.get("longitude")
+            if lat and lon:
+                print(f"[GEO] Localização recebida: {lat}, {lon}")
+                endereco = await geocodificar(float(lat), float(lon))
+                print(f"[GEO] Endereço: {endereco}")
+                sessoes[numero]["local"] = endereco
+                sessoes[numero]["etapa"] = "AGUARDANDO_FOTO"
+                prefere_audio = sessoes[numero].get("prefere_audio")
+                if prefere_audio:
+                    await falar(numero,
+                        f"Localizacao recebida. Endereco identificado: {endereco}. "
+                        f"Voce tem uma foto do problema? Se sim, envie agora. Se nao, diga pular.")
+                else:
+                    await enviar_mensagem(numero,
+                        f"📍 Localização recebida!\n"
+                        f"*Endereço identificado:* {endereco}\n\n"
+                        f"📸 Você tem uma foto do problema? Se sim, envie agora.\n"
+                        f"Se não tiver, responda *pular*")
+        return {"status": "ok"}
+
+    # 🖼️ IMAGEM — salva na sessão se estiver aguardando foto
     if tipo == "image":
         if numero in sessoes and sessoes[numero].get("etapa") == "AGUARDANDO_FOTO":
             image_data = msg.get("image") or {}
@@ -1117,6 +1182,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         await enviar_mensagem(numero,
             f"Entendi! Vou registrar uma denúncia de:\n"
             f"📂 *{classificacao['modulo']}* › {classificacao['subcategoria']}\n\n"
-            f"📍 Qual o *endereço ou local* onde aconteceu?\n(rua, bairro ou ponto de referência)")
+            f"📍 Onde aconteceu?\n\nCompartilhe sua 📌 *localização pelo WhatsApp* ou digite o endereço (rua, bairro ou ponto de referência)")
 
     return {"status": "ok"}
