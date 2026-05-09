@@ -707,7 +707,7 @@ async def processar_fluxo(numero: str, mensagem: str):
             session["local"] = mensagem.strip()
         session["etapa"] = "AGUARDANDO_FOTO"
         await enviar_mensagem(numero,
-            "📸 Você tem uma foto do problema? Se sim, envie agora.\n"
+            "📸 Você tem uma *foto ou vídeo* do problema? (vídeo máx. 30s)\n"
             "Se não tiver, responda *pular*")
 
     elif etapa == "AGUARDANDO_FOTO":
@@ -755,7 +755,7 @@ async def processar_fluxo(numero: str, mensagem: str):
             elif correcao == "foto":
                 session["etapa"] = "AGUARDANDO_FOTO"
                 await enviar_mensagem(numero,
-                    "📸 Envie a nova foto ou responda *pular* para continuar sem foto.")
+                    "📸 Envie uma *foto ou vídeo* (máx. 30s) ou responda *pular*.")
             else:
                 # Quer corrigir o tipo/descrição — extrai descrição limpa e reclassifica
                 descricao_limpa = await extrair_descricao_limpa(mensagem)
@@ -833,7 +833,7 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
         else:
             session["local"] = mensagem.strip()
         session["etapa"] = "AGUARDANDO_FOTO"
-        await falar(numero, "Voce tem uma foto do problema? Se sim, envie agora. Se nao tiver, diga pular.")
+        await falar(numero, "Voce tem uma foto ou video curto do problema? Video de no maximo 30 segundos. Se nao tiver, diga pular.")
 
     elif etapa == "AGUARDANDO_FOTO":
         session["foto_url"] = None
@@ -875,7 +875,7 @@ async def processar_fluxo_audio(numero: str, mensagem: str):
                 await falar(numero, "Qual o novo endereco ou local?")
             elif correcao == "foto":
                 session["etapa"] = "AGUARDANDO_FOTO"
-                await falar(numero, "Envie a nova foto ou diga pular para continuar sem foto.")
+                await falar(numero, "Envie uma foto ou video de ate 30 segundos, ou diga pular.")
             else:
                 descricao_limpa = await extrair_descricao_limpa(mensagem)
                 classificacao = await classificar(descricao_limpa)
@@ -928,19 +928,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 if prefere_audio:
                     await falar(numero,
                         f"Localizacao recebida. Endereco identificado: {endereco}. "
-                        f"Voce tem uma foto do problema? Se sim, envie agora. Se nao, diga pular.")
+                        f"Voce tem uma foto ou video de ate 30 segundos? Se nao, diga pular.")
                 else:
                     await enviar_mensagem(numero,
                         f"📍 Localização recebida!\n"
                         f"*Endereço identificado:* {endereco}\n\n"
-                        f"📸 Você tem uma foto do problema? Se sim, envie agora.\n"
+                        f"📸 Você tem uma *foto ou vídeo* do problema? (vídeo máx. 30s)\n"
                         f"Se não tiver, responda *pular*")
         return {"status": "ok"}
 
     # 🖼️ IMAGEM — salva na sessão se estiver aguardando foto
-    if tipo == "image":
+    if tipo in ("image", "video"):
         if numero in sessoes and sessoes[numero].get("etapa") == "AGUARDANDO_FOTO":
-            image_data = msg.get("image") or {}
+            image_data = msg.get("image") or msg.get("video") or {}
             # Salva preview base64 (miniatura) + id separados na sessão
             import json as _json
             preview  = image_data.get("preview")   # miniatura base64 já no payload

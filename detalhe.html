@@ -85,15 +85,25 @@ async function init() {
             const src = mediaId
               ? `/api/foto/${encodeURIComponent(mediaId)}`
               : preview || null;
+            // Detecta se é vídeo pelo ID ou mime_type
+            const isVideo = mediaId && (mediaId.startsWith('mp4') || mediaId.startsWith('video') ||
+                            (parsed && parsed.mime_type && parsed.mime_type.startsWith('video')));
             return src ? `
           <div class="card">
-            <div class="info-label" style="margin-bottom:8px">Foto enviada</div>
-            <img src="${src}" class="foto-preview" alt="Foto da denúncia"
-                 onerror="this.src=''; this.style.display='none'; this.nextElementSibling.style.display='block'"
-                 style="width:100%;max-height:500px;object-fit:contain;background:#0F172A;border-radius:8px">
-            <div style="display:none;color:var(--text-dim);font-size:13px;padding:24px;text-align:center">
-              📷 Foto não disponível — <a href="${src}" target="_blank" style="color:var(--blue-light)">tentar abrir diretamente</a>
-            </div>
+            <div class="info-label" style="margin-bottom:8px">${isVideo ? 'Vídeo enviado' : 'Foto enviada'}</div>
+            ${isVideo ? `
+              <video controls style="width:100%;max-height:500px;border-radius:8px;background:#000;border:1px solid var(--border)">
+                <source src="${src}">
+                Seu navegador não suporta vídeo.
+              </video>
+            ` : `
+              <img src="${src}" class="foto-preview" alt="Foto da denúncia"
+                   onerror="this.style.display='none';this.nextElementSibling.style.display='block'"
+                   style="width:100%;max-height:500px;object-fit:contain;background:var(--surface2);border-radius:8px">
+              <div style="display:none;color:var(--text-dim);font-size:13px;padding:24px;text-align:center">
+                📷 Mídia não disponível — <a href="${src}" target="_blank" style="color:var(--blue)">abrir diretamente</a>
+              </div>
+            `}
           </div>` : '';
           })() : ''}
       </div>
