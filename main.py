@@ -621,7 +621,7 @@ async def processar_audio(numero: str, audio_url: str):
 
     if classificacao["confianca"] == "baixa":
         sessoes[numero]["etapa"] = "AGUARDANDO_DESCRICAO"
-        await falar(numero, "Ola! Sou o assistente de denuncias. Pode me contar o que esta acontecendo?")
+        await falar(numero, "Ola! Sou o Tucu, assistente de denuncias urbanas. Pode me contar o que esta acontecendo?")
     else:
         sessoes[numero].update({
             "etapa":        "AGUARDANDO_LOCAL",
@@ -941,12 +941,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     if tipo in ("image", "video"):
         if numero in sessoes and sessoes[numero].get("etapa") == "AGUARDANDO_FOTO":
             image_data = msg.get("image") or msg.get("video") or {}
-            # Salva preview base64 (miniatura) + id separados na sessão
             import json as _json
-            preview  = image_data.get("preview")   # miniatura base64 já no payload
-            media_id = image_data.get("id")        # ID pra baixar a imagem original
-            print(f"[FOTO] Foto recebida. ID: {media_id}")
-            foto_url = _json.dumps({"preview": preview, "id": media_id}) if (preview or media_id) else None
+            preview   = image_data.get("preview")
+            media_id  = image_data.get("id")
+            mime_type = image_data.get("mime_type", "")
+            print(f"[FOTO] Midia recebida. ID: {media_id} | tipo: {mime_type}")
+            foto_url = _json.dumps({"preview": preview, "id": media_id, "mime_type": mime_type}) if (preview or media_id) else None
             sessoes[numero]["foto_url"] = foto_url
             prefere_audio = sessoes[numero].get("prefere_audio")
             # Avança para confirmação
@@ -1141,7 +1141,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         elif any(p in texto_lower for p in perguntas_bot):
             sessoes[numero] = {"etapa": "AGUARDANDO_DESCRICAO"}
             await enviar_mensagem(numero,
-                "Olá! 👋 Sou o *assistente de denúncias urbanas*.\n\n"
+                "Olá! 👋 Sou o *Tucu*, assistente de denúncias urbanas.\n\n"
                 "Estou aqui para registrar problemas da sua cidade como:\n"
                 "• Buracos e alagamentos\n"
                 "• Falta de luz ou água\n"
@@ -1154,8 +1154,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             if numero in sessoes:
                 del sessoes[numero]
             await enviar_mensagem(numero,
-                "⚠️ Esse assunto está fora do meu escopo.\n\n"
-                "Sou o *assistente de denúncias urbanas* — registro apenas problemas de infraestrutura e serviços públicos da cidade, como:\n\n"
+                "Sou o *Tucu* — registro apenas problemas de infraestrutura e serviços públicos da cidade, como:\n\n"
+                "Sou o *Tucu* — registro apenas problemas de infraestrutura e serviços públicos da cidade, como:\n\n"
                 "🕳️ Buracos e alagamentos\n"
                 "💡 Falta de energia ou iluminação\n"
                 "💧 Falta de água\n"
@@ -1171,7 +1171,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     if classificacao["confianca"] == "baixa":
         sessoes[numero] = {"etapa": "AGUARDANDO_DESCRICAO"}
         await enviar_mensagem(numero,
-            "Olá! 👋 Sou o assistente de denúncias urbanas.\n\nPode me contar o problema que deseja denunciar?")
+            "Olá! 👋 Sou o *Tucu*, assistente de denúncias urbanas.\n\nPode me contar o problema que deseja denunciar?")
     else:
         sessoes[numero] = {
             "etapa":        "AGUARDANDO_LOCAL",
